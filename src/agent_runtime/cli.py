@@ -168,29 +168,39 @@ def _handoff(workspace, independent=False):
     spec = workspace.get('handoff')
     if spec is None:
         return
-    try:
-        if not isinstance(spec, dict):
-            raise RuntimeError_('invalid handoff configuration')
-        if spec.get('owner') == 'external':
-            if spec.get('attested') is not True:
-                raise RuntimeError_('external handoff owner lacks explicit attestation')
-            return
-        if spec.get('owner') != 'runtime':
-            raise RuntimeError_('handoff requires owner runtime or external')
-        command = _dependency(spec, 'handoff')
-        result = subprocess.run([*command, '--workspace', workspace['_root']],
-                                stdout=subprocess.PIPE, text=True, encoding='utf-8',
-                                env={**os.environ, DEPTH_ENV: '1'})
-        if result.returncode:
-            raise RuntimeError_('handoff receiver failed with exit ' + str(result.returncode))
-        receipt = json.loads(result.stdout)
-        if not isinstance(receipt, dict) or receipt.get('status') not in {'updated', 'unchanged', 'not-configured'}:
-            raise RuntimeError_('handoff receiver returned unsuccessful status')
-    except (RuntimeError_, OSError, ValueError) as exc:
-        if not independent:
-            raise
-        print(json.dumps({'handoff': 'unconfirmed', 'independent': True, 'error': str(exc)},
+    if not isinstance(spec, dict):
+        raise RuntimeError_('invalid handoff configuration')
+    if spec.get('owner') == 'external':
+        if spec.get('attested') is not True:
+            raise RuntimeError_('external handoff owner lacks explicit attestation')
+        return
+    if spec.get('owner') != 'runtime':
+        raise RuntimeError_('handoff requires owner runtime or external')
+    command = _dependency(spec, 'handoff')
+    if independent:
+        print(json.dumps({'handoff': 'skipped', 'independent': True, 'reason': 'explicit-independent'},
                          ensure_ascii=False), file=sys.stderr)
+        return
+    from agent_runtime.handoff import BUDGET_SECONDS
+    try:
+        result = subprocess.run([*command, '--workspace', workspace['_root'],
+                                 '--budget-seconds', str(BUDGET_SECONDS)],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, encoding='utf-8', timeout=BUDGET_SECONDS,
+                                env={**os.environ, DEPTH_ENV: '1'})
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError_('handoff receiver failed with reason timeout stage receive applied false') from exc
+    receipt = {}
+    if result.stdout:
+        try:
+            receipt = json.loads(result.stdout)
+        except ValueError as exc:
+            raise RuntimeError_('handoff receiver failed with exit ' + str(result.returncode)) from exc
+    if result.returncode or not isinstance(receipt, dict) or receipt.get('status') not in {'updated', 'unchanged', 'not-configured'}:
+        reason = receipt.get('reason', 'unknown') if isinstance(receipt, dict) else 'unknown'
+        stage = receipt.get('stage', 'receive') if isinstance(receipt, dict) else 'receive'
+        raise RuntimeError_('handoff receiver failed with exit ' + str(result.returncode)
+                            + ' reason ' + str(reason) + ' stage ' + str(stage))
 
 
 def _launch(command, env):

@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import sys
 import subprocess
 import tempfile
 import unittest
@@ -46,7 +47,7 @@ class ReceiveTests(unittest.TestCase):
         data.update(changes)
         (self.dest / "rules" / "handoff-receive.json").write_text(json.dumps(data), encoding="utf-8")
         # Tests replace HTTPS fetch with local git transport only at the subprocess boundary.
-        def local_fetch(root, binding, common):
+        def local_fetch(root, binding, common, deadline=None):
             binding = dict(binding); binding["repository"] = str(self.source)
             temporary = Path(tempfile.mkdtemp(prefix="fixture-fetch-", dir=common))
             git(self.base, "init", "--bare", "-q", str(temporary))
@@ -142,6 +143,25 @@ class ReceiveTests(unittest.TestCase):
                 raise
             return  # Windows hosts may disallow creation of symlinks.
         self.assertEqual("error", receive.receive(self.dest)["status"])
+
+    def test_command_timeout_is_a_reason_and_does_not_write(self):
+        path = self.dest / "HANDOFF.md"
+        before = path.read_bytes()
+        with self.assertRaises(receive.ReceiveError) as caught:
+            receive._run([sys.executable, "-c", "import time; time.sleep(30)"],
+                         deadline=receive._deadline(0.2))
+        self.assertEqual(caught.exception.reason, "timeout")
+        self.assertEqual(caught.exception.applied, False)
+        self.assertEqual(before, path.read_bytes())
+
+    def test_absent_branch_is_distinct_from_transport(self):
+        advertised = subprocess.CompletedProcess(["git"], 2, "", "")
+        with patch.object(receive, "_run", side_effect=[subprocess.CompletedProcess(["git"], 1, "", ""), advertised]):
+            with self.assertRaises(receive.ReceiveError) as caught:
+                self.original_fetch(self.dest, {"repository": "https://example.invalid/repo", "branch": "missing"}, self.base)
+        self.assertEqual(caught.exception.reason, "branch-absent")
+        self.assertEqual(caught.exception.stage, "advertise")
+        self.assertEqual(caught.exception.exit_code, 2)
 
     def test_transport_failure_and_history_rejection_do_not_write(self):
         path = self.dest / "HANDOFF.md"
