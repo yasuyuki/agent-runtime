@@ -126,6 +126,21 @@ class RuntimeTests(unittest.TestCase):
         result = self.invoke("grok")
         self.assertEqual(result.returncode, 23, result.stderr); self.assertEqual(receipt.read_text(), "one")
 
+    def test_independent_skips_receiver_but_pin_mismatch_blocks(self):
+        receiver = self.root / "skip-receive.py"
+        marker = self.root / "ran"
+        receiver.write_text("from pathlib import Path\nimport sys\nPath(%r).write_text('ran')\nprint('{\\\"status\\\":\\\"updated\\\"}')\n" % str(marker), encoding="utf-8")
+        self.write_config(handoff={"owner": "runtime", "argv": [sys.executable, str(receiver)], "source": str(receiver), "source_sha256": digest(receiver)})
+        skipped = self.invoke("grok", independent=True)
+        self.assertEqual(skipped.returncode, 23, skipped.stderr)
+        self.assertFalse(marker.exists())
+        self.assertIn('"reason": "explicit-independent"', skipped.stderr)
+        receiver.write_text("changed\n", encoding="utf-8")
+        blocked = self.invoke("grok", independent=True)
+        self.assertEqual(blocked.returncode, 2)
+        self.assertIn("source pin", blocked.stderr)
+        self.assertFalse(marker.exists())
+
     def test_handoff_failure_requires_explicit_independent_launch(self):
         receiver = self.root / "fail-receive.py"
         receiver.write_text("raise SystemExit(9)\n", encoding="utf-8")

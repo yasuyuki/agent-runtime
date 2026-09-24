@@ -7,14 +7,17 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import stat
 import subprocess
+import time
 import uuid
 
 
@@ -23,19 +26,75 @@ _PAIR = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _MARK = re.compile(r"<!-- handoff-receive:([A-Za-z0-9][A-Za-z0-9._-]*) revision=([0-9a-f]+) -->\n?(.*?)<!-- /handoff-receive:\1 -->", re.S)
 
 
+# The isolated launcher's existing SSH qualification uses this same bound.
+# One deadline covers advertise and fetch. It is not a measured percentile.
+BUDGET_SECONDS = 30
+_STDERR_LIMIT = 512
+
+
 class ReceiveError(RuntimeError):
-    pass
+    def __init__(self, message, stage="receive", reason="unknown", exit_code=None, applied=False):
+        super().__init__(message)
+        self.stage = stage
+        self.reason = reason
+        self.exit_code = exit_code
+        self.applied = applied
 
 
 def _result(status, **values):
     return {"status": status, **values}
 
 
-def _run(argv, cwd=None, text=False):
+def _redact(payload):
+    if not payload:
+        return ""
+    if isinstance(payload, bytes):
+        text = payload.decode("utf-8", errors="replace")
+    else:
+        text = payload
+    text = re.sub(r"://[^/\s]+@", "://", text)
+    text = re.sub(r"(?i)(authorization:\s*)\S+", r"\1", text)
+    return text[:_STDERR_LIMIT]
+
+
+def _deadline(budget):
+    if budget is None:
+        return None
+    return time.monotonic() + max(0, float(budget))
+
+
+def _run(argv, cwd=None, text=False, deadline=None):
     environment = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never")
-    return subprocess.run(argv, cwd=cwd, stdin=subprocess.DEVNULL,
-                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                          text=text, check=False, env=environment)
+    timeout = None if deadline is None else max(0, deadline - time.monotonic())
+    kwargs = {}
+    if os.name != "nt":
+        kwargs["start_new_session"] = True
+    process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               text=text, env=environment, **kwargs)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _stop(process)
+        raise ReceiveError("timed out waiting for " + " ".join(argv[:4]),
+                           stage="command", reason="timeout")
+    completed = subprocess.CompletedProcess(argv, process.returncode, stdout, _redact(stderr))
+    return completed
+
+
+def _stop(process):
+    if os.name == "nt":
+        process.kill()
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            process.kill()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        raise ReceiveError("child survived cancellation", stage="command",
+                           reason="cancel-unconfirmed", exit_code=process.returncode)
 
 
 def _regular(path):
@@ -163,32 +222,50 @@ def _fragment(repo, oid, document):
     return body
 
 
-def _fetch(root, binding, common):
+def _command_error(completed, stage):
+    detail = completed.stderr if isinstance(completed.stderr, str) else _redact(completed.stderr)
+    return ReceiveError(detail or "git exited " + str(completed.returncode),
+                        stage=stage, reason="transport", exit_code=completed.returncode)
+
+
+def _fetch(root, binding, common, deadline=None):
     # Reuse Git's existing objects without changing a ref, FETCH_HEAD, index or
     # checkout. Pin the advertised OID before fetching; a moving branch cannot
     # select different bytes halfway through receipt.
     repository = binding["repository"]
-    rewrites = _run(["git", "-C", str(root), "config", "--get-regexp", r"^url\..*\.insteadof$"], text=True)
+    rewrites = _run(["git", "-C", str(root), "config", "--get-regexp", r"^url\..*\.insteadof$"],
+                    text=True, deadline=deadline)
     if rewrites.returncode not in (0, 1):
-        raise ReceiveError("could not check Git URL rewrites")
+        raise _command_error(rewrites, "rewrite")
     for row in rewrites.stdout.splitlines():
         parts = row.split(None, 1)
         if len(parts) == 2 and repository.startswith(parts[1]):
-            raise ReceiveError("configured URL rewrite changes the fixed source")
+            raise ReceiveError("configured URL rewrite changes the fixed source",
+                               stage="rewrite", reason="invalid-config")
     prefix = ["git", "-C", str(root), "-c", "protocol.allow=never",
               "-c", "protocol.https.allow=always", "-c", "http.followRedirects=false"]
     ref = "refs/heads/" + binding["branch"]
-    advertised = _run(prefix + ["ls-remote", "--exit-code", repository, ref], text=True)
+    advertised = _run(prefix + ["ls-remote", "--exit-code", repository, ref],
+                      text=True, deadline=deadline)
     rows = advertised.stdout.splitlines()
-    if advertised.returncode or len(rows) != 1:
-        raise ReceiveError("fixed shared branch is unavailable")
+    if advertised.returncode == 2 and not rows:
+        raise ReceiveError("fixed shared branch is absent", stage="advertise",
+                           reason="branch-absent", exit_code=2)
+    if advertised.returncode:
+        raise _command_error(advertised, "advertise")
+    if len(rows) != 1:
+        raise ReceiveError("invalid shared branch advertisement", stage="advertise",
+                           reason="advertisement-invalid", exit_code=advertised.returncode)
     fields = rows[0].split()
     if len(fields) != 2 or fields[1] != ref or not _OID.fullmatch(fields[0]):
-        raise ReceiveError("invalid shared branch advertisement")
+        raise ReceiveError("invalid shared branch advertisement", stage="advertise",
+                           reason="advertisement-invalid", exit_code=advertised.returncode)
     incoming = fields[0]
-    if _run(prefix + ["fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
-                       "--no-auto-maintenance", "--refmap=", repository, incoming]).returncode:
-        raise ReceiveError("fetch failed")
+    fetched = _run(prefix + ["fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+                             "--no-auto-maintenance", "--refmap=", repository, incoming],
+                   deadline=deadline)
+    if fetched.returncode:
+        raise _command_error(fetched, "fetch")
     return root, incoming
 
 
@@ -322,13 +399,23 @@ def _lock(path):
         else:
             import fcntl
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+    except OSError as exc:
         handle.close()
-        raise ReceiveError("receiver is already running")
+        conflict = isinstance(exc, BlockingIOError) or getattr(exc, "winerror", None) in (33, 36)
+        if not conflict and exc.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
+            raise
+        raise ReceiveError("receiver is already running", stage="lock", reason="busy")
     return handle
 
 
-def receive(workspace):
+def _error_result(exc):
+    if isinstance(exc, ReceiveError):
+        return _result("error", error=str(exc), stage=exc.stage, reason=exc.reason,
+                       exit=exc.exit_code, applied=False)
+    return _result("error", error=str(exc), stage="receive", reason="unknown", exit=None, applied=False)
+
+
+def receive(workspace, budget=BUDGET_SECONDS):
     """Receive a configured fragment.  Returns a structured status dictionary."""
     try:
         declared = Path(workspace)
@@ -345,6 +432,7 @@ def receive(workspace):
         common.mkdir(parents=True, exist_ok=True)
         if not _safe_directory(common):
             raise ReceiveError("Git recovery directory traverses a link")
+        deadline = _deadline(budget)
         with _lock(common / "receiver.lock"):
             _recover_pending(target, common)
             # Recheck after acquiring the receiver lock; outside editors remain
@@ -355,7 +443,7 @@ def receive(workspace):
             original, _identity = _read_regular(target)
             if target.is_symlink():
                 raise ReceiveError("HANDOFF.md is a symlink")
-            repo, incoming = _fetch(root, binding, common)
+            repo, incoming = _fetch(root, binding, common, deadline)
             try:
                 text = original.decode("utf-8")
                 all_markers = list(_MARK.finditer(text))
@@ -420,9 +508,28 @@ def receive(workspace):
                 if repo != root:
                     shutil.rmtree(repo, ignore_errors=True)
     except ReceiveError as exc:
-        return _result("error", error=str(exc))
+        return _error_result(exc)
     except (OSError, UnicodeDecodeError) as exc:
-        return _result("error", error=str(exc))
+        return _error_result(exc)
+
+
+def _verify_invoked_source(config_path, workspace):
+    settings = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    wanted = os.path.normcase(os.path.normpath(workspace))
+    matches = [row for row in settings["workspaces"]
+               if os.path.normcase(os.path.normpath(row["root"])) == wanted]
+    if len(matches) != 1:
+        raise ReceiveError("HANDOFF workspace binding is missing or ambiguous",
+                           stage="pin", reason="invalid-config")
+    binding = matches[0].get("handoff")
+    source = Path(__file__).resolve()
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    argv = binding.get("argv") if isinstance(binding, dict) else None
+    pinned = isinstance(argv, list) and any(Path(arg).resolve() == source for arg in argv if isinstance(arg, str))
+    if (not isinstance(binding, dict) or binding.get("owner") != "runtime"
+            or binding.get("source_sha256") != digest or not pinned):
+        raise ReceiveError("fixed HANDOFF receiver source hash mismatch",
+                           stage="pin", reason="pin-mismatch")
 
 
 def main(argv=None):
@@ -430,8 +537,17 @@ def main(argv=None):
     import argparse
     parser = argparse.ArgumentParser(description="Receive the explicitly bound shared HANDOFF")
     parser.add_argument("--workspace", required=True)
+    parser.add_argument("--config")
+    parser.add_argument("--budget-seconds", type=float, default=BUDGET_SECONDS)
     args = parser.parse_args(argv)
-    result = receive(args.workspace)
+    if args.config:
+        try:
+            _verify_invoked_source(args.config, args.workspace)
+        except (OSError, ReceiveError, ValueError, KeyError, TypeError) as exc:
+            result = _error_result(exc if isinstance(exc, ReceiveError) else ReceiveError(str(exc), stage="pin", reason="invalid-config"))
+            print(json.dumps(result, ensure_ascii=True, sort_keys=True))
+            return 1
+    result = receive(args.workspace, args.budget_seconds)
     print(json.dumps(result, ensure_ascii=True, sort_keys=True))
     return 0 if result.get("status") in {"not-configured", "updated", "unchanged"} else 1
 
