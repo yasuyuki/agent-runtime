@@ -44,7 +44,7 @@ exits without driving. `--help` is the authority for options.
    and runs `pip install --no-deps` from that copy. The checkout itself gets no
    build output. It asserts the installed `cli.py` bytes and `--version` match
    the checkout.
-3. **Drive.** Creates a Git workspace `workspace 日本語/nested`, a recorder
+3. **Drive.** Creates a Git workspace `workspace/nested 日本語`, a recorder
    vendor and a configuration that pins the lifecycle hash. It then runs the
    installed `codex` twice with fixed expectations from
    [transparent launch](features/transparent-launch.md).
