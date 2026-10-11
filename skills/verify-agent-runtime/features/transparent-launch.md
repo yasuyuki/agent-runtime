@@ -1,6 +1,6 @@
 # Transparent launch
 
-A user in a declared active workspace runs a standard name (here `codex`).
+A user in a configured workspace runs a standard name (here `codex`).
 The vendor sees the same arguments, stdin, working directory and exit code it
 would see if started directly. The only change is the native cwd option that
 the runtime prepends. The run passes through the pinned lifecycle's

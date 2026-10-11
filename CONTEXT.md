@@ -15,9 +15,22 @@ The configured executable that implements a standard name, given as an absolute 
 _Avoid_: backend, real CLI
 
 **Workspace**:
-A configured root with a state, enabled standard names and a lifecycle. The
-deepest unique root containing the effective cwd selects it.
-_Avoid_: project, worktree, task
+A configured root bound to a lifecycle. The deepest root containing the
+effective cwd selects it. It informs supervision and never grants or denies a
+launch.
+_Avoid_: project, worktree, task, allowlist
+
+**Unmanaged launch**:
+A launch whose effective cwd is outside every workspace. The vendor runs
+directly, with a notice that no lifecycle supervises it.
+
+**Refusal**:
+A launch the runtime will not start because it would break a trust or
+evidence boundary. It names the error and, when one exists, the recovery.
+
+**Launch plan**:
+The resolved vendor, workspace, lifecycle, HANDOFF route and final command for
+one launch, reported by `--explain` without running anything.
 
 **Lifecycle**:
 The external, hash-pinned executable whose `resolve-run` interface receives each launch.

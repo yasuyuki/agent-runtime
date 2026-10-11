@@ -14,15 +14,22 @@ agent-runtime --help
 
 Set `AGENT_RUNTIME_CONFIG` to an explicit version-1 JSON configuration, or
 pass `--config PATH` to `agent-runtime` before the tool name. A configuration declares the
-absolute vendor argv for each tool and each allowed workspace. Workspaces are
-matched by canonical real path; the deepest match must be unique and active.
-The runtime refuses unknown, pending, held, ambiguous, and tool-disabled
-workspaces.
+absolute vendor argv for each tool and, optionally, workspaces. A workspace binds
+a pinned lifecycle to a directory tree. It is not a list of places or tools the
+user may launch. The deepest workspace root containing the effective cwd, by
+canonical real path, selects the lifecycle. Outside every root the vendor runs
+directly, and one JSON `notice` on stderr says that no lifecycle supervises it.
+The runtime never refuses a second session of the same or another tool.
+Measured workspace-lifecycle 0.3.1 and 0.4.8 still refuse a second session in the
+same managed task and any launch from an unbound checkout of a managed
+repository. Those refusals belong to the lifecycle and are tracked in
+[issue #1](https://github.com/yasuyuki/agent-runtime/issues/1).
 
 Each workspace supplies a fixed, SHA-256 pinned lifecycle CLI. The runtime
 calls its public `resolve-run` interface and never reads lifecycle state or Git
-metadata. A HANDOFF receiver, when required, is likewise a fixed, source-hash
-bound CLI; its owner is explicitly `runtime` or an attested external GUI owner.
+metadata. The lifecycle decides whether the directory is a managed task and
+may itself refuse, for example a held task. A HANDOFF receiver, when required,
+is likewise a fixed, source-hash bound CLI; its owner is explicitly `runtime` or an attested external GUI owner.
 Native cwd options remain in the vendor argv while the selected cwd is checked
 before launch. Tool-specific maintenance commands can read the configured tool
 binding while skipping malformed workspace declarations; they never select an
@@ -38,8 +45,6 @@ SHA-256 of the invoked source file.
   "tools": {"codex": {"argv": ["/absolute/vendor/codex"]}},
   "workspaces": [{
     "root": "/absolute/workspace",
-    "state": "active",
-    "tools": ["codex"],
     "lifecycle": {
       "argv": ["/absolute/bin/workspace-lifecycle"],
       "source": "/absolute/bin/workspace-lifecycle",
@@ -50,6 +55,30 @@ SHA-256 of the invoked source file.
 }
 ```
 
+Version 0.2.0 required `state: "active"` and a `tools` list on every
+workspace and refused everything else. Those fields are now ignored.
+
+A workspace without a `lifecycle` binds none, so launches under it are
+unmanaged too. The runtime refuses a launch only for an invalid configuration
+or when running it would break a trust or evidence boundary. Examples are a
+missing vendor binding, a vendor that recurses into the runtime, a native cwd
+that does not exist, two native cwd options, a duplicate workspace root, an
+unsupported lifecycle interface, a changed lifecycle or receiver pin, and an
+unsuccessful HANDOFF receipt. A refusal is one JSON object on stderr with
+`error` and, when the user or configuration owner can resolve it, `recovery`.
+
+## Agent management
+
+Agents manage work through the lifecycle, not through launch refusals.
+`agent-runtime --explain TOOL [-- ARGS]` runs nothing. It prints the resolved
+launch as JSON on stdout: vendor, effective cwd, workspace root, the verified
+lifecycle argv, HANDOFF route, final command and notices. It exits 2 with the
+same refusal object when the launch would be refused. An agent appends
+lifecycle subcommands to that argv, such as `--repo ROOT status`,
+`lease-status`, `lease-release`, `hold`, `release-hold` and `finish`.
+Their contracts belong to workspace-lifecycle. Inside a managed task the
+vendor also receives `WORKSPACE_LIFECYCLE_CONTEXT` with its `finish_argv`.
+
 The command help is the authoritative reference for launcher arguments. The
 runtime does not generate configuration, scan environments, adopt workspaces,
 look up versions or models, or finish lifecycle work. A lifecycle finish needs
@@ -57,7 +86,7 @@ the separately reviewed plan and result evidence required by its owner.
 
 ## Adoption and rollback boundary
 
-Version 0.2.0 is source-only, not a confirmed PyPI publication. Build the wheel
+Version 0.3.0 is source-only, not a confirmed PyPI publication. Build the wheel
 from the accepted source revision and install it alongside the separately pinned
 [workspace-lifecycle 0.3.1](https://github.com/yasuyuki/workspace-lifecycle) wheel in an isolated environment. Pins identify the invoked
 entry and any adopted package files requiring drift detection; the environment
@@ -78,8 +107,8 @@ until that separate live acceptance. Revert using that preserved set only after
 preserving and reconciling work created after the switch; do not overwrite new
 results. This source change does not switch Windows or Linux consumers.
 
-The runtime enforces launch scope, not confinement after launch. Native changes
-of directory or creation of other worktrees remain vendor behavior. Lifecycle
+The runtime selects a lifecycle for the launch; it does not confine the
+session afterward. Native changes of directory or creation of other worktrees remain vendor behavior. Lifecycle
 context exposes its fixed `finish_argv`; a reviewed plan and result reference
 remain mandatory. Child exit alone does not finish a task. Neither this adapter
 nor lifecycle intercepts arbitrary direct Git operations or guarantees cleanup

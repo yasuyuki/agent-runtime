@@ -4,8 +4,10 @@ Terms follow [CONTEXT.md](../../../CONTEXT.md).
 
 | Feature | User entry point | State in this verifier |
 | --- | --- | --- |
-| [Transparent launch](transparent-launch.md) | Installed `codex` with `AGENT_RUNTIME_CONFIG`, cwd inside an active workspace | Driven by `scripts/verify.py` |
-| Workspace refusal | Same entry from an undeclared, held, pending, ambiguous or tool-disabled workspace | not-run. Issue #1 changes which of these refuse. |
+| [Transparent launch](transparent-launch.md) | Installed `codex` with `AGENT_RUNTIME_CONFIG`, cwd inside a workspace | Driven by `scripts/verify.py` |
+| Unmanaged launch | Same entry from a directory outside every workspace | not-run. Covered by `tests/test_runtime.py` and `tests/test_lifecycle_integration.py`. |
+| Launch plan | `agent-runtime --explain TOOL` | not-run. Covered by the same tests. |
+| Duplicate root refusal | Same entry with one workspace root bound twice | not-run |
 | Pin refusal | Same entry with a lifecycle whose bytes differ from its pin | not-run |
 | HANDOFF receipt | Launch with `handoff.owner: runtime`, `external`, or `--handoff-independent` | not-run |
 | Maintenance commands | `codex --version`, `claude update`, `grok doctor` and similar forms, which skip workspace selection | not-run |
