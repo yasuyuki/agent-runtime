@@ -114,3 +114,10 @@ a claim of freshness; the explicit independent-work exception remains visible.
 CI builds a wheel and tests its installed package outside the source checkout
 on Linux and Windows with Python 3.10 and 3.12. Lifecycle integration uses the
 fixed public 0.3.1 source artifact, without copying its implementation.
+
+## Verification
+
+[verify-agent-runtime](skills/verify-agent-runtime/SKILL.md) installs a
+checkout and proves a transparent `codex` launch through a selected lifecycle,
+with retained evidence. Its [feature map](skills/verify-agent-runtime/features/README.md)
+lists the entry points it leaves not-run. Terms follow [CONTEXT.md](CONTEXT.md).
