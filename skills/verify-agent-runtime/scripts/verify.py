@@ -29,9 +29,9 @@ sys.exit(%d)
 """
 EXPECTATIONS = {
     "install": "The checkout installs into a new venv; installed cli.py bytes equal the checkout's and --version equals pyproject.",
-    "launch": "From a nested workspace directory, `codex exec \"two words\" 日本語` runs the vendor once in that directory "
+    "launch": "From the nested workspace directory `nested 日本語`, `codex exec \"two words\" 日本語` runs the vendor once in that directory "
               "with argv [--cd, <nested>, exec, two words, 日本語], the same stdin, its stderr and exit %d." % VENDOR_EXIT,
-    "native-cwd": "From the workspace root, `codex -C nested exec x` runs the vendor in the root with argv unchanged.",
+    "native-cwd": "From the workspace root, `codex -C \"nested 日本語\" exec x` runs the vendor in the root with argv unchanged.",
     "no-lifecycle-state": "The unmanaged workspace repository gains no workspace-lifecycle state.",
 }
 NOT_RUN = ["undeclared/held/pending/ambiguous/tool-disabled refusal", "pin mismatch refusal",
@@ -145,8 +145,8 @@ def run(repo, lifecycle, evidence_root=None, doctor_only=False, agent="unknown")
         version = execute("version", [str(bindir / ("agent-runtime" + suffix)), "--version"], scratch)
         assertion("installed version", expected_version, version.stdout.strip())
 
-        workspace = scratch / "workspace 日本語"
-        nested = workspace / "nested"
+        workspace = scratch / "workspace"
+        nested = workspace / "nested 日本語"
         nested.mkdir(parents=True)
         command(["git", "init", "-q", str(workspace)], scratch)
         marker = scratch / "vendor-calls.jsonl"
@@ -178,12 +178,12 @@ def run(repo, lifecycle, evidence_root=None, doctor_only=False, agent="unknown")
         assertion("launch stdout is vendor output", calls[0], json.loads(launched.stdout))
         assertion("launch stderr carries vendor stderr", True, "vendor-stderr" in launched.stderr)
 
-        override = execute("native-cwd", [codex, "-C", "nested", "exec", "x"], workspace, input="", env=env)
+        override = execute("native-cwd", [codex, "-C", nested.name, "exec", "x"], workspace, input="", env=env)
         calls = vendor_calls()
         assertion("native-cwd exit code", VENDOR_EXIT, override.returncode)
         assertion("native-cwd vendor calls", 2, len(calls))
         assertion("native-cwd vendor cwd", str(workspace), calls[1]["cwd"])
-        assertion("native-cwd vendor argv", ["-C", "nested", "exec", "x"], calls[1]["argv"])
+        assertion("native-cwd vendor argv", ["-C", nested.name, "exec", "x"], calls[1]["argv"])
 
         common = command(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], workspace)
         assertion("no lifecycle state", False, (Path(common.stdout.strip()) / "workspace-lifecycle").exists())
