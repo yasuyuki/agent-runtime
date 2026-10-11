@@ -34,7 +34,7 @@ EXPECTATIONS = {
     "native-cwd": "From the workspace root, `codex -C \"nested 日本語\" exec x` runs the vendor in the root with argv unchanged.",
     "no-lifecycle-state": "The unmanaged workspace repository gains no workspace-lifecycle state.",
 }
-NOT_RUN = ["undeclared/held/pending/ambiguous/tool-disabled refusal", "pin mismatch refusal",
+NOT_RUN = ["unmanaged launch", "launch plan (--explain)", "duplicate root refusal", "pin mismatch refusal",
            "HANDOFF receiver", "maintenance commands", "claude/grok entries", "managed lifecycle task",
            "real vendor CLI", "Ctrl+C/console signals"]
 SKIP = shutil.ignore_patterns(".git", "build", "dist", "*.egg-info", "__pycache__", ".venv")
@@ -155,7 +155,7 @@ def run(repo, lifecycle, evidence_root=None, doctor_only=False, agent="unknown")
         config = scratch / "runtime.json"
         config.write_text(json.dumps({"version": 1,
             "tools": {"codex": {"argv": [sys.executable, str(vendor)]}},
-            "workspaces": [{"root": str(workspace), "state": "active", "tools": ["codex"],
+            "workspaces": [{"root": str(workspace),
                             "lifecycle": {"argv": [str(lifecycle)], "source": str(lifecycle),
                                           "interface": "resolve-run-v1",
                                           "pins": [{"path": str(lifecycle),

@@ -31,16 +31,23 @@ class RuntimeTests(unittest.TestCase):
         self.write_config()
 
     def write_config(self, **workspace_updates):
-        item = {"root": str(self.work), "tools": ["grok", "codex", "claude"], "state": "active", "lifecycle": {"argv": [sys.executable, str(self.life)], "source": str(self.life), "interface": "resolve-run-v1", "pins": [{"path": str(self.life), "sha256": digest(self.life)}]}}
+        item = {"root": str(self.work), "lifecycle": {"argv": [sys.executable, str(self.life)], "source": str(self.life), "interface": "resolve-run-v1", "pins": [{"path": str(self.life), "sha256": digest(self.life)}]}}
         item.update(workspace_updates)
         self.config.write_text(json.dumps({"version": 1, "tools": {name: {"argv": [sys.executable, str(self.vendor)]} for name in ("grok", "codex", "claude")}, "workspaces": [item]}), encoding="utf-8")
 
-    def invoke(self, tool, *args, cwd=None, input="", independent=False):
-        python = sys.executable
+    def argv(self, tool, *args, independent=False, explain=False):
+        flags = ["--handoff-independent"] * independent + ["--explain"] * explain
+        return [sys.executable, "-m", "agent_runtime.cli", "--config", str(self.config), *flags, tool, "--", *args]
+
+    def env(self):
         env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
         env.pop("PYTHONPATH", None)
-        flag = ["--handoff-independent"] if independent else []
-        return subprocess.run([python, "-m", "agent_runtime.cli", "--config", str(self.config), *flag, tool, "--", *args], cwd=cwd or self.nested, input=input, text=True, encoding="utf-8", capture_output=True, env=env)
+        return env
+
+    def invoke(self, tool, *args, cwd=None, input="", independent=False, explain=False):
+        return subprocess.run(self.argv(tool, *args, independent=independent, explain=explain),
+                              cwd=cwd or self.nested, input=input, text=True, encoding="utf-8",
+                              capture_output=True, env=self.env())
 
     def test_subprocess_transparent_unicode_cwd_stdio_exit(self):
         result = self.invoke("grok", "--prompt", 'a "quoted" 日本語', input="stdin 日本語")
@@ -61,25 +68,93 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)["argv"], ["--cwd", str(self.work)])
         self.assertEqual(json.loads(result.stderr.splitlines()[0])['lifecycle'][2], str(self.work))
 
-    def test_held_unknown_and_ambiguous_refuse(self):
-        self.write_config(state="hold", reason="review")
-        held = self.invoke("grok")
-        self.assertEqual(held.returncode, 2); self.assertIn("workspace is hold: review", held.stderr)
-        self.write_config()
-        unknown = self.invoke("grok", cwd=self.root)
-        self.assertEqual(unknown.returncode, 2); self.assertIn("not declared", unknown.stderr)
+    def test_undeclared_cwd_launches_vendor_directly_with_notice(self):
+        result = self.invoke("grok", "x", cwd=self.root)
+        self.assertEqual(result.returncode, 23, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["cwd"], str(self.root))
+        self.assertEqual(json.loads(result.stdout)["argv"], ["--cwd", str(self.root), "x"])
+        notice = json.loads(result.stderr.splitlines()[0])["notice"]
+        self.assertEqual((notice["lifecycle"], notice["cwd"]), ("none", str(self.root)))
+        self.assertNotIn('"lifecycle": [', result.stderr)
+        raw = json.loads(self.config.read_text(encoding="utf-8")); del raw["workspaces"]
+        self.config.write_text(json.dumps(raw), encoding="utf-8")
+        bare = self.invoke("codex", "exec", "y")
+        self.assertEqual(bare.returncode, 23, bare.stderr)
+        self.assertEqual(json.loads(bare.stdout)["argv"], ["--cd", str(self.nested), "exec", "y"])
+
+    def test_former_state_and_tool_fields_do_not_gate_launch(self):
+        self.write_config(state="hold", reason="review", tools=["codex"])
+        result = self.invoke("grok")
+        self.assertEqual(result.returncode, 23, result.stderr)
+        self.assertEqual(json.loads(result.stderr.splitlines()[0])["lifecycle"][2], str(self.nested))
+
+    def test_workspace_without_lifecycle_launches_unmanaged(self):
+        raw = json.loads(self.config.read_text(encoding="utf-8"))
+        raw["workspaces"].append({"root": str(self.nested), "state": "pending"})
+        self.config.write_text(json.dumps(raw), encoding="utf-8")
+        result = self.invoke("grok")
+        self.assertEqual(result.returncode, 23, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["argv"], ["--cwd", str(self.nested)])
+        self.assertEqual(json.loads(result.stderr.splitlines()[0])["notice"]["lifecycle"], "none")
+        raw["workspaces"][-1]["lifecycle"] = {"interface": "other"}
+        self.config.write_text(json.dumps(raw), encoding="utf-8")
+        invalid = self.invoke("grok")
+        self.assertEqual(invalid.returncode, 2)
+        self.assertEqual(json.loads(invalid.stderr), {"ok": False, "error": "unsupported lifecycle interface",
+                                                     "recovery": "bind a resolve-run-v1 lifecycle to " + str(self.nested)})
+
+    def test_duplicate_root_refuses_with_recovery(self):
         raw = json.loads(self.config.read_text(encoding="utf-8")); raw["workspaces"].append(dict(raw["workspaces"][0]))
         self.config.write_text(json.dumps(raw), encoding="utf-8")
-        ambiguous = self.invoke("grok")
-        self.assertEqual(ambiguous.returncode, 2); self.assertIn("ambiguous", ambiguous.stderr)
+        result = self.invoke("grok")
+        self.assertEqual(result.returncode, 2)
+        refusal = json.loads(result.stderr)
+        self.assertEqual(refusal["error"], "configuration binds workspace root more than once: " + str(self.work))
+        self.assertIn("remove the duplicate", refusal["recovery"])
+        self.assertEqual(result.stdout, "")
 
-    def test_pending_and_tool_disallow_refuse(self):
-        self.write_config(state="pending", reason="binding review")
-        pending = self.invoke("grok")
-        self.assertEqual(pending.returncode, 2); self.assertIn("pending", pending.stderr)
-        self.write_config(tools=["codex"])
-        denied = self.invoke("grok")
-        self.assertEqual(denied.returncode, 2); self.assertIn("not enabled", denied.stderr)
+    def test_running_session_does_not_block_another_tool(self):
+        for cwd in (self.nested, self.root):
+            first = subprocess.Popen(self.argv("codex", "exec", "first"), cwd=cwd, stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                     encoding="utf-8", env=self.env())
+            try:
+                second = self.invoke("claude", "second", cwd=cwd)
+                self.assertIsNone(first.poll())
+            finally:
+                out, err = first.communicate("done")
+            self.assertEqual(second.returncode, 23, second.stderr)
+            self.assertEqual(json.loads(second.stdout)["argv"], ["second"])
+            self.assertEqual(first.returncode, 23, err)
+            self.assertEqual(json.loads(out)["stdin"], "done")
+
+    def test_explain_reports_plan_without_running_anything(self):
+        receiver = self.root / "explain-receive.py"; marker = self.root / "explain-ran"
+        receiver.write_text("from pathlib import Path\nPath(%r).write_text('ran')\n" % str(marker), encoding="utf-8")
+        self.write_config(handoff={"owner": "runtime", "argv": [sys.executable, str(receiver)], "source": str(receiver), "source_sha256": digest(receiver)})
+        managed = self.invoke("codex", "exec", "x", explain=True)
+        self.assertEqual(managed.returncode, 0, managed.stderr)
+        plan = json.loads(managed.stdout)
+        vendor = [sys.executable, str(self.vendor)]
+        self.assertEqual(plan["workspace"], str(self.work))
+        self.assertEqual(plan["lifecycle"], [sys.executable, str(self.life)])
+        self.assertEqual(plan["handoff"], {"owner": "runtime", "argv": [sys.executable, str(receiver)]})
+        self.assertEqual(plan["command"], [sys.executable, str(self.life), "resolve-run", "--cwd", str(self.nested),
+                                           "--launch-cwd", str(self.nested), "--", *vendor,
+                                           "--cd", str(self.nested), "exec", "x"])
+        self.assertEqual((plan["ok"], plan["notices"], managed.stderr), (True, [], ""))
+        self.assertFalse(marker.exists())
+        outside = json.loads(self.invoke("codex", explain=True, cwd=self.root).stdout)
+        self.assertEqual((outside["workspace"], outside["lifecycle"]), (None, None))
+        self.assertEqual(outside["command"], [*vendor, "--cd", str(self.root)])
+        self.assertEqual(outside["notices"][0]["lifecycle"], "none")
+        self.life.write_text("changed", encoding="utf-8")
+        refused = self.invoke("codex", explain=True)
+        self.assertEqual(refused.returncode, 2)
+        refusal = json.loads(refused.stdout)
+        self.assertFalse(refusal["ok"])
+        self.assertIn("lifecycle source pin does not match", refusal["error"])
+        self.assertIn("updates its pin", refusal["recovery"])
 
     def test_native_values_terminator_duplicates_and_compact_are_bounded(self):
         # Values which happen to spell options and words after -- are vendor
@@ -147,6 +222,8 @@ class RuntimeTests(unittest.TestCase):
         self.write_config(handoff={"owner":"runtime", "argv":[sys.executable, str(receiver)], "source":str(receiver), "source_sha256":digest(receiver)})
         blocked = self.invoke("grok")
         self.assertEqual(blocked.returncode, 2); self.assertIn("receiver failed", blocked.stderr)
+        self.assertEqual(json.loads(blocked.stderr)["recovery"],
+                         "for work that does not need the HANDOFF, rerun as agent-runtime --handoff-independent TOOL")
         independent = self.invoke("grok", independent=True)
         self.assertEqual(independent.returncode, 23, independent.stderr)
         self.assertIn('"independent": true', independent.stderr)
@@ -185,20 +262,23 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), 'updated')
 
-    def test_nested_hold_never_falls_back_to_parent(self):
+    def test_deepest_binding_selects_its_own_lifecycle(self):
+        child = self.root / "child-life.py"
+        child.write_text(self.life.read_text(encoding="utf-8").replace("'lifecycle'", "'child'"), encoding="utf-8")
         raw = json.loads(self.config.read_text())
-        raw['workspaces'].append({'root': str(self.nested), 'tools': ['grok'],
-                                  'state': 'hold', 'reason': 'child held'})
+        raw['workspaces'].append({'root': str(self.nested), 'lifecycle': {
+            'argv': [sys.executable, str(child)], 'source': str(child), 'interface': 'resolve-run-v1',
+            'pins': [{'path': str(child), 'sha256': digest(child)}]}})
         self.config.write_text(json.dumps(raw))
-        result = self.invoke('grok')
-        self.assertEqual(result.returncode, 2)
-        self.assertIn('child held', result.stderr)
-        result = self.invoke('grok', '--cwd', 'nested', cwd=self.work)
-        self.assertEqual(result.returncode, 2)
-        self.assertIn('child held', result.stderr)
+        for args, cwd in (([], self.nested), (['--cwd', 'nested'], self.work)):
+            result = self.invoke('grok', *args, cwd=cwd)
+            self.assertEqual(result.returncode, 23, result.stderr)
+            self.assertEqual(json.loads(result.stderr.splitlines()[0])['child'][2], str(self.nested))
 
     def test_repair_forms_are_vendor_specific(self):
-        self.write_config(state='hold')
+        raw = json.loads(self.config.read_text())
+        raw['workspaces'] = 'broken'
+        self.config.write_text(json.dumps(raw))
         for tool, args in [('codex', ['update']), ('claude', ['auth', 'login']),
                            ('claude', ['doctor']), ('grok', ['inspect', '--json'])]:
             self.assertEqual(self.invoke(tool, *args).returncode, 23)
@@ -206,7 +286,7 @@ class RuntimeTests(unittest.TestCase):
                            ('grok', ['--single', 'doctor'])]:
             result = self.invoke(tool, *args)
             self.assertEqual(result.returncode, 2)
-            self.assertIn('hold', result.stderr)
+            self.assertIn('workspaces must be a list', result.stderr)
 
     def test_installed_standard_entrypoints_use_explicit_config(self):
         scripts = Path(sysconfig.get_path("scripts"))
@@ -214,7 +294,7 @@ class RuntimeTests(unittest.TestCase):
         env.pop("PYTHONPATH", None)
         for tool in ("codex", "claude", "grok"):
             entry = scripts / (tool + (".exe" if os.name == "nt" else ""))
-            result = subprocess.run([str(entry), "hello 日本語"], cwd=self.nested,
+            result = subprocess.run([str(entry), "hello 日本語"], cwd=self.nested, input="",
                                     env=env, text=True, encoding="utf-8", capture_output=True)
             self.assertEqual(result.returncode, 23, result.stderr)
             self.assertEqual(json.loads(result.stdout)["argv"][-1], "hello 日本語")

@@ -92,7 +92,7 @@ pathlib.Path(%r).write_text(json.dumps({'cwd':launch,'argv':sys.argv[1:]}),encod
     def write_config(self, roots):
         self.config.write_text(json.dumps({"version": 1,
             "tools": {"grok": {"argv": [sys.executable, str(self.vendor)]}},
-            "workspaces": [{"root": str(root), "state": "active", "tools": ["grok"],
+            "workspaces": [{"root": str(root),
                             "lifecycle": self.lifecycle_spec()} for root in roots]}),
             encoding="utf-8")
 
@@ -116,6 +116,46 @@ pathlib.Path(%r).write_text(json.dumps({'cwd':launch,'argv':sys.argv[1:]}),encod
         observed = json.loads(self.marker.read_text(encoding="utf-8"))
         self.assertEqual(observed["cwd"], str(self.base))
         self.assertEqual(observed["argv"], ["--cwd", relative, "two words", "日本語"])
+
+    def test_agent_uses_explained_lifecycle_to_inspect_and_resolve_a_hold(self):
+        self.write_config([self.topic])
+        explained = run(self.topic, self.runtime, "--config", str(self.config), "--explain", "grok",
+                        check=False, env=self.environment)
+        self.assertEqual(explained.returncode, 0, explained.stdout)
+        plan = json.loads(explained.stdout)
+        self.assertEqual(plan["lifecycle"], [self.lifecycle])
+        manage = [*plan["lifecycle"], "--repo", plan["workspace"]]
+        status = json.loads(run(self.topic, *manage, "status", env=self.environment).stdout)
+        self.assertEqual((status["task"], status["request"]), ("runtime", "issue/runtime"))
+        lease = json.loads(run(self.topic, *manage, "lease-status", "--task", "runtime",
+                               env=self.environment).stdout)
+        self.assertEqual(lease["lease"], {"busy": False, "receipt": None})
+        run(self.topic, *manage, "hold", "--task", "runtime", "--reason", "user paused",
+            "--next-action", "resume on request", env=self.environment)
+        held = self.invoke(self.topic)
+        self.assertEqual(held.returncode, 2)
+        self.assertIn("held", held.stderr)
+        run(self.topic, *manage, "release-hold", "--task", "runtime",
+            "--evidence", "issue/runtime resumed", env=self.environment)
+        resumed = self.invoke(self.base, "--cwd", str(self.topic))
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertFalse(self.topic.exists())
+
+    def test_undeclared_repository_launches_directly(self):
+        outside = self.base / "outside"
+        run(self.base, "git", "init", "--initial-branch=trunk", str(outside))
+        self.write_config([self.topic])
+        plain_vendor = self.base / "plain-vendor.py"
+        plain_vendor.write_text("import os; print(os.getcwd())\n", encoding="utf-8")
+        raw = json.loads(self.config.read_text(encoding="utf-8"))
+        raw["tools"]["grok"]["argv"] = [sys.executable, str(plain_vendor)]
+        self.config.write_text(json.dumps(raw), encoding="utf-8")
+        direct = self.invoke(outside)
+        self.assertEqual(direct.returncode, 0, direct.stderr)
+        self.assertEqual(direct.stdout.strip(), str(outside))
+        self.assertEqual(json.loads(direct.stderr)["notice"]["lifecycle"], "none")
+        common = Path(git(outside, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+        self.assertFalse((common / "workspace-lifecycle").exists())
 
     def test_owner_boundaries_refuse_and_unmanaged_creates_no_state(self):
         marker = self.marker
