@@ -12,7 +12,7 @@ configuration, and `codex ...` runs inside the declared workspace. The vendor
 is a synthetic recorder, and the lifecycle is the real executable you select.
 Read [the feature map](features/README.md) for what this proves and what it
 leaves not-run. The recipe passed on Windows 11 with Python 3.14 and
-workspace-lifecycle 0.4.8. That result is not evidence for a later run.
+workspace-lifecycle 0.4.8 and 0.5.1. That result is not evidence for a later run.
 
 Requirements: Python 3.10+ with `venv` and `pip`, Git, network access for
 pip to fetch the setuptools build backend, and an installed

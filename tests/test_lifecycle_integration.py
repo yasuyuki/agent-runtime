@@ -129,12 +129,16 @@ pathlib.Path(%r).write_text(json.dumps({'cwd':launch,'argv':sys.argv[1:]}),encod
         self.assertEqual((status["task"], status["request"]), ("runtime", "issue/runtime"))
         lease = json.loads(run(self.topic, *manage, "lease-status", "--task", "runtime",
                                env=self.environment).stdout)
-        self.assertEqual(lease["lease"], {"busy": False, "receipt": None})
+        self.assertEqual(lease["lease"], {"busy": False, "uses": []})
         run(self.topic, *manage, "hold", "--task", "runtime", "--reason", "user paused",
             "--next-action", "resume on request", env=self.environment)
         held = self.invoke(self.topic)
-        self.assertEqual(held.returncode, 2)
-        self.assertIn("held", held.stderr)
+        self.assertEqual(held.returncode, 2, held.stderr)
+        notices = [json.loads(line)["notice"] for line in held.stderr.splitlines() if line.startswith('{"notice"')]
+        self.assertEqual([notice.get("hold", {}).get("reason") for notice in notices], ["user paused"])
+        self.assertIn("task is held", held.stderr)
+        self.assertTrue(self.topic.exists())
+        self.assertFalse(self.marker.exists())
         run(self.topic, *manage, "release-hold", "--task", "runtime",
             "--evidence", "issue/runtime resumed", env=self.environment)
         resumed = self.invoke(self.base, "--cwd", str(self.topic))
@@ -157,32 +161,29 @@ pathlib.Path(%r).write_text(json.dumps({'cwd':launch,'argv':sys.argv[1:]}),encod
         common = Path(git(outside, "rev-parse", "--path-format=absolute", "--git-common-dir"))
         self.assertFalse((common / "workspace-lifecycle").exists())
 
-    def test_owner_boundaries_refuse_and_unmanaged_creates_no_state(self):
-        marker = self.marker
+    def test_unbound_and_legacy_checkouts_launch_unsupervised(self):
         self.write_config([self.root, self.topic])
+        plain_vendor = self.base / "plain-vendor.py"
+        plain_vendor.write_text("import os; print(os.getcwd(), os.environ.get('WORKSPACE_LIFECYCLE_TASK'))\n",
+                                encoding="utf-8")
+        raw = json.loads(self.config.read_text(encoding="utf-8"))
+        raw["tools"]["grok"]["argv"] = [sys.executable, str(plain_vendor)]
+        self.config.write_text(json.dumps(raw), encoding="utf-8")
         unbound = self.invoke(self.root)
-        self.assertEqual(unbound.returncode, 2)
-        self.assertIn("binding", unbound.stderr)
-        self.assertFalse(marker.exists())
-
-        held = run(self.topic, self.lifecycle, "--repo", str(self.topic), "hold",
-                   "--task", "runtime", "--reason", "fixture hold",
-                   "--next-action", "await release", env=self.environment)
-        self.assertTrue(json.loads(held.stdout)["ok"])
-        refused = self.invoke(self.topic)
-        self.assertEqual(refused.returncode, 2)
-        self.assertIn("held", refused.stderr)
-        self.assertFalse(marker.exists())
+        self.assertEqual((unbound.returncode, unbound.stdout.strip()), (0, str(self.root) + " None"), unbound.stderr)
+        notice = json.loads(unbound.stderr.splitlines()[0])["notice"]
+        self.assertEqual((notice["lifecycle"], notice["reason"]), ("unmanaged", "checkout is not bound to a lifecycle task"))
 
         common = Path(git(self.root, "rev-parse", "--path-format=absolute", "--git-common-dir"))
         legacy = common / "agent-branches"
         legacy.mkdir()
         (legacy / "state.json").write_text("{}", encoding="utf-8")
         legacy_result = self.invoke(self.root)
-        self.assertEqual(legacy_result.returncode, 2)
-        self.assertIn("legacy", legacy_result.stderr)
-        self.assertFalse(marker.exists())
+        self.assertEqual(legacy_result.returncode, 0, legacy_result.stderr)
+        self.assertIn("legacy", json.loads(legacy_result.stderr.splitlines()[0])["notice"]["reason"])
+        self.assertEqual((legacy / "state.json").read_text(encoding="utf-8"), "{}")
 
+    def test_unmanaged_repository_creates_no_state(self):
         unmanaged = self.base / "unmanaged"
         run(self.base, "git", "init", "--initial-branch=trunk", str(unmanaged))
         nested = unmanaged / "nested"; nested.mkdir()

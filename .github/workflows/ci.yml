@@ -27,7 +27,7 @@ jobs:
             runtime="$RUNNER_TEMP/agent-runtime-tests/bin"
           fi
           "$runtime/python" -m pip install --no-index dist/*.whl
-          "$runtime/python" -m pip install "workspace-lifecycle @ https://github.com/yasuyuki/workspace-lifecycle/archive/2d6d099db547b6613c266025c93aaf3cbe15066e.zip"
+          "$runtime/python" -m pip install "workspace-lifecycle @ https://github.com/yasuyuki/workspace-lifecycle/archive/997d43f31406ac7aa6fb65e4c0c6392e51eaa101.zip"
           cd "$RUNNER_TEMP"
           "$runtime/agent-runtime" --version
           "$runtime/agent-handoff-receive" --help
