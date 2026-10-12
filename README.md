@@ -28,7 +28,7 @@ repository. Those refusals belong to the lifecycle and are tracked in
 Each workspace supplies a fixed, SHA-256 pinned lifecycle CLI. The runtime
 calls its public `resolve-run` interface and never reads lifecycle state or Git
 metadata. The lifecycle decides whether the directory is a managed task and
-may itself refuse, for example a held task. A HANDOFF receiver, when required,
+may itself refuse, for example a task whose retirement is pending. A HANDOFF receiver, when required,
 is likewise a fixed, source-hash bound CLI; its owner is explicitly `runtime` or an attested external GUI owner.
 Native cwd options remain in the vendor argv while the selected cwd is checked
 before launch. Tool-specific maintenance commands can read the configured tool

@@ -51,6 +51,6 @@ POSIX `exec` handoff are not checked separately. A Linux pass needs its own
 run.
 
 The workspace root is ASCII on purpose. On Windows, workspace-lifecycle 0.3.1
-(the version CI pins) exits 2 with a locale codec decode error (`cp932` here) when the root contains
-日本語; 0.4.8 launches. That is a lifecycle limit, not this feature, so a
+exits 2 with a locale codec decode error (`cp932` here) when the root contains
+日本語; 0.4.8 and later launch. That is a lifecycle limit, not this feature, so a
 non-ASCII root is not tested here. The other entries in the [feature map](README.md) stay not-run.
