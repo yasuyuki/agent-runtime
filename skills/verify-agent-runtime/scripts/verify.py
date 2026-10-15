@@ -50,8 +50,8 @@ def command(argv, cwd, **kwargs):
 
 
 def doctor(repo, lifecycle):
-    if sys.version_info < (3, 10):
-        raise ValueError("Python 3.10 or newer is required")
+    if sys.version_info < (3, 12):
+        raise ValueError("Python 3.12 or newer is required")
     pyproject = repo / "pyproject.toml"
     if not pyproject.is_file() or 'name = "agent-runtime"' not in pyproject.read_text(encoding="utf-8"):
         raise ValueError("--repo is not an agent-runtime checkout: " + str(repo))
