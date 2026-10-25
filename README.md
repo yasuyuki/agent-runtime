@@ -35,6 +35,12 @@ before launch. Tool-specific maintenance commands can read the configured tool
 binding while skipping malformed workspace declarations; they never select an
 ambient `PATH` vendor.
 
+On Windows, a configured vendor whose normal resolution fails only with
+`WinError 448` can recover through its junction or symbolic-link chain. The
+runtime launches the physical target and reports the original argv as
+`configured_vendor` in `--explain`. Other resolution errors still refuse the
+launch.
+
 The small schema keeps host-specific values in the configuration owner. This
 illustrates its shape; every shown path is a placeholder and every pin is the
 SHA-256 of the invoked source file.
@@ -86,7 +92,7 @@ the separately reviewed plan and result evidence required by its owner.
 
 ## Adoption and rollback boundary
 
-Version 0.3.0 is source-only, not a confirmed PyPI publication. Build the wheel
+Version 0.3.1 is source-only, not a confirmed PyPI publication. Build the wheel
 from the accepted source revision and install it alongside the separately pinned
 [workspace-lifecycle 0.3.1](https://github.com/yasuyuki/workspace-lifecycle) wheel in an isolated environment. Pins identify the invoked
 entry and any adopted package files requiring drift detection; the environment

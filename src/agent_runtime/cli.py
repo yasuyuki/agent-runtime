@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 import signal
+import stat
 import sys
 import sysconfig
 
@@ -70,6 +71,80 @@ def _argv(value, label):
         raise RuntimeError_(label + ' must be a nonempty string array')
     _absolute(value[0], label + ' executable')
     return list(value)
+
+
+def _vendor_argv(value):
+    if not isinstance(value, list) or not value or any(not isinstance(x, str) or not x for x in value):
+        raise RuntimeError_('vendor must be a nonempty string array')
+    if not Path(value[0]).is_absolute():
+        raise RuntimeError_('vendor executable must be an absolute path')
+    return list(value)
+
+
+def _vendor_path_error(path, exc):
+    if isinstance(exc, FileNotFoundError):
+        return RuntimeError_('vendor executable is unavailable: ' + str(path))
+    return exc
+
+
+def _windows_vendor_path(path):
+    current = Path(path.anchor)
+    pending = list(path.parts[1:])
+    seen = set()
+    junction = getattr(stat, 'IO_REPARSE_TAG_MOUNT_POINT', 0xA0000003)
+    while pending:
+        part = pending.pop(0)
+        if part in ('', '.'):
+            continue
+        if part == '..':
+            if current.parent == current:
+                raise RuntimeError_('vendor executable path leaves its volume')
+            current = current.parent
+            continue
+        candidate = current / part
+        try:
+            metadata = os.lstat(candidate)
+        except OSError as exc:
+            raise _vendor_path_error(candidate, exc) from exc
+        tag = getattr(metadata, 'st_reparse_tag', None)
+        symlink = stat.S_ISLNK(metadata.st_mode)
+        is_junction = tag == junction
+        if tag and not (symlink or is_junction):
+            raise RuntimeError_('vendor executable path has unsupported reparse point: ' + str(candidate))
+        if not (symlink or is_junction):
+            current = candidate
+            continue
+        key = os.path.normcase(os.path.normpath(os.fspath(candidate)))
+        if key in seen:
+            raise RuntimeError_('vendor executable path has a link cycle: ' + str(candidate))
+        seen.add(key)
+        try:
+            target = os.readlink(candidate)
+        except OSError as exc:
+            raise _vendor_path_error(candidate, exc) from exc
+        namespaced = target.startswith('\\??\\') or target.startswith('\\\\?\\')
+        if namespaced:
+            target = target[4:]
+        target_path = Path(target)
+        if namespaced and not target_path.is_absolute():
+            raise RuntimeError_('vendor executable path has unsupported link target: ' + str(candidate))
+        if target_path.is_absolute():
+            current = Path(target_path.anchor)
+            pending = list(target_path.parts[1:]) + pending
+        else:
+            current = candidate.parent
+            pending = list(target_path.parts) + pending
+    return current
+
+
+def _vendor_executable(value):
+    path = Path(value[0])
+    try:
+        return path.resolve(), None
+    except OSError as exc:
+        if os.name != 'nt' or getattr(exc, 'winerror', None) != 448:
+            raise
+        return _windows_vendor_path(path), list(value)
 
 
 # Only native options whose operands can look like directory flags need skipping.
@@ -262,14 +337,16 @@ def _plan(tool, argv, config_path, independent=False):
     if not isinstance(spec, dict):
         raise RuntimeError_('unknown tool: ' + tool,
                             'add an absolute vendor argv for this tool to the runtime configuration')
-    vendor = _argv(spec.get('argv'), 'vendor')
-    executable = Path(vendor[0])
+    vendor = _vendor_argv(spec.get('argv'))
+    executable, configured_vendor = _vendor_executable(vendor)
+    if configured_vendor is not None:
+        vendor[0] = str(executable)
     scripts = Path(sysconfig.get_path('scripts'))
     suffix = '.exe' if os.name == 'nt' else ''
     managed = {Path(sys.argv[0]).resolve(), Path(__file__).resolve()}
     managed.update((scripts / (name + suffix)).resolve()
                    for name in ('agent-runtime', 'codex', 'claude', 'grok'))
-    if (executable.resolve() in managed
+    if (executable in managed
             or any(vendor[i:i + 2] in (['-m', 'agent_runtime'], ['-m', 'agent_runtime.cli'])
                    for i in range(len(vendor)))):
         raise RuntimeError_('vendor executable recurses to agent-runtime')
@@ -277,6 +354,8 @@ def _plan(tool, argv, config_path, independent=False):
         raise RuntimeError_('vendor executable is unavailable: ' + str(executable))
     plan = {'tool': tool, 'vendor': vendor, 'maintenance': repair, 'workspace': None,
             'lifecycle': None, 'handoff': None, 'notices': []}
+    if configured_vendor is not None:
+        plan['configured_vendor'] = configured_vendor
     if repair:
         return {**plan, 'command': [*vendor, *argv]}
     launch = Path.cwd().resolve()
