@@ -19,7 +19,7 @@ Contract sources:
 
 ## Prerequisites
 
-Python 3.12+ with `venv` and `pip`, Git, network access for the setuptools
+Python 3.14 with `venv` and `pip`, Git, network access for the setuptools
 build backend, and an absolute `workspace-lifecycle` executable. The helper
 builds everything else in its scratch directory: the venv, the Git workspace
 `workspace` with a `nested 日本語` directory, the recorder `vendor.py` and

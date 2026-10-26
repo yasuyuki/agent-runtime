@@ -1,6 +1,6 @@
 # Agent runtime
 
-`agent-runtime` is an independently installable Python 3.12+ package that
+`agent-runtime` is an independently installable Python 3.14 package that
 connects the standard `codex`, `claude`, and `grok` names to explicitly
 configured vendor executables. It does not import agent-rules, private
 configuration, placement, inventory, or workspace state implementations.
@@ -147,7 +147,7 @@ retain the existing receiver contract. An unsuccessful receipt never becomes
 a claim of freshness; the explicit independent-work exception remains visible.
 
 CI builds a wheel and tests its installed package outside the source checkout
-on Linux and Windows with Python 3.12. Lifecycle integration uses the
+on Linux and Windows with Python 3.14. Lifecycle integration uses the
 fixed public 0.3.1 source artifact, without copying its implementation.
 
 ## Verification
