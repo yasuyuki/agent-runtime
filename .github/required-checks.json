@@ -1,10 +1,10 @@
 [
   {
     "app": "github-actions",
-    "name": "package (ubuntu-latest, 3.12)"
+    "name": "package (ubuntu-latest, 3.14)"
   },
   {
     "app": "github-actions",
-    "name": "package (windows-latest, 3.12)"
+    "name": "package (windows-latest, 3.14)"
   }
 ]
